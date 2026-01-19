@@ -9,9 +9,10 @@ import { Browser, Page } from 'puppeteer';
 import { registerChatRoutes } from "./replit_integrations/chat";
 import { registerImageRoutes } from "./replit_integrations/image";
 import { registerAudioRoutes } from "./replit_integrations/audio";
-import { openai } from "./replit_integrations/chat/routes"; // Use the configured client
+import { openai } from "./replit_integrations/image/client"; 
 
-puppeteer.use(StealthPlugin());
+const stealth = StealthPlugin();
+puppeteer.use(stealth);
 
 let browser: Browser | null = null;
 let page: Page | null = null;
@@ -19,10 +20,18 @@ let page: Page | null = null;
 async function getBrowser() {
   if (!browser) {
     browser = await puppeteer.launch({
-      headless: true, // Use new headless mode
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      headless: "new",
+      executablePath: '/usr/bin/google-chrome-stable',
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled'
+      ],
     });
+    
     page = await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1280, height: 800 });
   }
   return { browser, page };
@@ -30,8 +39,8 @@ async function getBrowser() {
 
 async function getScreenshot() {
   if (!page) return undefined;
-  const buffer = await page.screenshot({ encoding: 'base64', type: 'jpeg', quality: 80 });
-  return buffer as string;
+  const buffer = await page.screenshot({ type: 'jpeg', quality: 80 });
+  return buffer.toString('base64');
 }
 
 export async function registerRoutes(
@@ -48,6 +57,7 @@ export async function registerRoutes(
       await getBrowser();
       res.json({ message: "Browser launched" });
     } catch (error: any) {
+      console.error("Launch error:", error);
       res.status(500).json({ message: error.message });
     }
   });
@@ -75,7 +85,6 @@ export async function registerRoutes(
           else if (input.text) await p.keyboard.type(input.text);
           break;
         case "scroll":
-             // Simple scroll down for now
              await p.evaluate(() => window.scrollBy(0, 500));
           break;
         case "back":
@@ -101,7 +110,7 @@ export async function registerRoutes(
       });
 
     } catch (error: any) {
-      console.error(error);
+      console.error("Action error:", error);
       res.status(500).json({ message: error.message });
     }
   });
@@ -126,7 +135,6 @@ export async function registerRoutes(
   app.post(api.ai.command.path, async (req, res) => {
      try {
         const { message, context } = req.body;
-        // Construct prompt with context
         const prompt = `
           You are controlling a browser. 
           Current URL: ${context?.url || 'none'}
@@ -143,19 +151,6 @@ export async function registerRoutes(
             - text: (if type)
         `;
         
-        // Use the imported OpenAI client from the integration
-        // Actually, I should use the one I imported or instantiate a new one if not exported.
-        // It is exported from replit_integrations/chat/routes.ts but I can also just use the global one if I exported it.
-        // Wait, I imported 'openai' from "./replit_integrations/chat/routes". Check if it exports it.
-        // The integration code for `server/replit_integrations/chat/routes.ts` DOES NOT export `openai`.
-        // `server/replit_integrations/chat/index.ts` exports `openai`? No, it exports registerChatRoutes and chatStorage.
-        // `server/replit_integrations/image/client.ts` exports `openai`.
-        // I can import from `server/replit_integrations/image/client.ts` or just instantiate it here.
-        // I'll stick to the one I imported from image/client or just instantiate it.
-        
-        // Let's use the one from image/client as it's cleaner.
-        const { openai } = require("./replit_integrations/image/client");
-
         const completion = await openai.chat.completions.create({
             model: "gpt-5.1",
             messages: [{ role: "user", content: prompt }],
@@ -166,6 +161,7 @@ export async function registerRoutes(
         res.json(result);
 
      } catch (error: any) {
+        console.error("AI error:", error);
         res.status(500).json({ message: error.message });
      }
   });

@@ -6,25 +6,20 @@ import { z } from "zod";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import puppeteerExtra from "puppeteer-extra";
-import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import AdblockerPlugin from "puppeteer-extra-plugin-adblocker";
-import puppeteer, { Browser as BrowserType, Page } from "puppeteer";
-import { Browser as InstalledBrowser, Cache, detectBrowserPlatform, install } from "@puppeteer/browsers";
+import { chromium, BrowserContext, Page } from "playwright-core";
 import { registerChatRoutes } from "./replit_integrations/chat";
 import { registerImageRoutes } from "./replit_integrations/image";
 import { registerAudioRoutes } from "./replit_integrations/audio";
 import { openai } from "./replit_integrations/image/client"; 
 
-puppeteerExtra.use(StealthPlugin());
-puppeteerExtra.use(AdblockerPlugin({ blockTrackers: true }));
-
-let browser: BrowserType | null = null;
+let browserContext: BrowserContext | null = null;
 let page: Page | null = null;
-let executablePathPromise: Promise<string | undefined> | null = null;
 
 const DEFAULT_VIEWPORT = { width: 1280, height: 800 };
-const EXECUTABLE_PATH_ENV_VARS = ["PUPPETEER_EXECUTABLE_PATH", "CHROME_PATH"];
+const EXECUTABLE_PATH_ENV_VARS = ["PLAYWRIGHT_EXECUTABLE_PATH", "CHROME_PATH"];
+const USER_DATA_DIR =
+  process.env.PLAYWRIGHT_USER_DATA_DIR ?? path.join(os.homedir(), ".cache", "playwright-profile");
+const HEADLESS = process.env.PLAYWRIGHT_HEADLESS !== "false";
 
 async function resolveExecutablePath(): Promise<string | undefined> {
   for (const envVar of EXECUTABLE_PATH_ENV_VARS) {
@@ -34,71 +29,45 @@ async function resolveExecutablePath(): Promise<string | undefined> {
     }
   }
 
-  const cacheDir =
-    process.env.PUPPETEER_CACHE_DIR ?? path.join(os.homedir(), ".cache", "puppeteer");
-  const platform = detectBrowserPlatform();
-  if (!platform) {
-    return undefined;
-  }
-
-  const buildId = puppeteer.PUPPETEER_REVISIONS.chrome;
-  const cache = new Cache(cacheDir);
-  let executablePath = cache.computeExecutablePath({
-    browser: InstalledBrowser.CHROME,
-    buildId,
-    platform,
-  });
-
-  if (!fs.existsSync(executablePath)) {
-    const installed = await install({
-      browser: InstalledBrowser.CHROME,
-      buildId,
-      cacheDir,
-      platform,
-    });
-    executablePath = installed.executablePath;
-  }
-
-  return executablePath;
-}
-
-async function getExecutablePath(): Promise<string | undefined> {
-  if (!executablePathPromise) {
-    executablePathPromise = resolveExecutablePath();
-  }
-  return executablePathPromise;
+  return undefined;
 }
 
 async function getBrowser() {
-  if (!browser) {
-    const executablePath = await getExecutablePath();
-    browser = await puppeteerExtra.launch({
-      headless: "new",
+  if (!browserContext) {
+    const executablePath = await resolveExecutablePath();
+    browserContext = await chromium.launchPersistentContext(USER_DATA_DIR, {
+      headless: HEADLESS,
       executablePath,
+      viewport: DEFAULT_VIEWPORT,
+      locale: "en-US",
+      timezoneId: "America/Los_Angeles",
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled',
-        '--disable-infobars',
-        '--window-position=0,0',
-        '--ignore-certifcate-errors',
-        '--ignore-certifcate-errors-spki-list',
-        '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-blink-features=AutomationControlled",
+        "--disable-infobars",
+        "--window-position=0,0",
+        "--ignore-certificate-errors",
       ],
     });
-    
-    page = await browser.newPage();
-    await page.setViewport(DEFAULT_VIEWPORT);
-    
-    // Additional stealth measures
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => false });
-      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+
+    await browserContext.addInitScript(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => false });
+      Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3, 4, 5] });
+      Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
+    });
+
+    page = browserContext.pages()[0] ?? (await browserContext.newPage());
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => false });
+      Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3, 4, 5] });
+      Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
     });
   }
-  return { browser, page };
+  return { browserContext, page };
 }
 
 async function getScreenshot() {
@@ -128,7 +97,7 @@ export async function registerRoutes(
 
   app.post(api.browser.action.path, async (req, res) => {
     try {
-      const { browser: b, page: p } = await getBrowser();
+      const { page: p } = await getBrowser();
       if (!p) throw new Error("Browser not initialized");
 
       const input = api.browser.action.input.parse(req.body);
@@ -136,20 +105,26 @@ export async function registerRoutes(
       switch (input.action) {
         case "navigate":
           if (input.url) {
-            await p.goto(input.url, { waitUntil: 'domcontentloaded' });
+            await p.goto(input.url, { waitUntil: "domcontentloaded" });
             await storage.addToHistory({ url: input.url, title: await p.title() });
           }
           break;
         case "click":
           if (input.selector) await p.click(input.selector);
-          else if (input.x !== undefined && input.y !== undefined) await p.mouse.click(input.x, input.y);
+          else if (input.x !== undefined && input.y !== undefined) {
+            await p.mouse.click(input.x, input.y);
+          }
           break;
         case "type":
-          if (input.selector && input.text) await p.type(input.selector, input.text);
-          else if (input.text) await p.keyboard.type(input.text);
+          if (input.selector && input.text) {
+            await p.click(input.selector, { timeout: 5000 });
+            await p.type(input.selector, input.text, { delay: 25 });
+          } else if (input.text) {
+            await p.keyboard.type(input.text, { delay: 25 });
+          }
           break;
         case "scroll":
-             await p.evaluate(() => window.scrollBy(0, 500));
+          await p.evaluate(() => window.scrollBy(0, 500));
           break;
         case "back":
           await p.goBack();

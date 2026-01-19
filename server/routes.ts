@@ -14,12 +14,26 @@ import { openai } from "./replit_integrations/image/client";
 
 let browserContext: BrowserContext | null = null;
 let page: Page | null = null;
+let lastLaunchError: string | null = null;
+let lastLaunchErrorAt: number | null = null;
 
 const DEFAULT_VIEWPORT = { width: 1280, height: 800 };
 const EXECUTABLE_PATH_ENV_VARS = ["PLAYWRIGHT_EXECUTABLE_PATH", "CHROME_PATH"];
 const USER_DATA_DIR =
   process.env.PLAYWRIGHT_USER_DATA_DIR ?? path.join(os.homedir(), ".cache", "playwright-profile");
 const HEADLESS = process.env.PLAYWRIGHT_HEADLESS !== "false";
+const LAUNCH_ERROR_COOLDOWN_MS = 30_000;
+
+function formatLaunchError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("libglib-2.0.so.0")) {
+    return [
+      "Playwright could not launch Chromium because required system libraries are missing.",
+      "Install libglib2.0-0 (and related deps) or set PLAYWRIGHT_EXECUTABLE_PATH to a Chrome/Chromium binary that has its dependencies installed.",
+    ].join(" ");
+  }
+  return message;
+}
 
 async function resolveExecutablePath(): Promise<string | undefined> {
   for (const envVar of EXECUTABLE_PATH_ENV_VARS) {
@@ -34,25 +48,42 @@ async function resolveExecutablePath(): Promise<string | undefined> {
 
 async function getBrowser() {
   if (!browserContext) {
+    if (
+      lastLaunchError &&
+      lastLaunchErrorAt &&
+      Date.now() - lastLaunchErrorAt < LAUNCH_ERROR_COOLDOWN_MS
+    ) {
+      throw new Error(lastLaunchError);
+    }
+
     const executablePath = await resolveExecutablePath();
-    browserContext = await chromium.launchPersistentContext(USER_DATA_DIR, {
-      headless: HEADLESS,
-      executablePath,
-      viewport: DEFAULT_VIEWPORT,
-      locale: "en-US",
-      timezoneId: "America/Los_Angeles",
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-blink-features=AutomationControlled",
-        "--disable-infobars",
-        "--window-position=0,0",
-        "--ignore-certificate-errors",
-      ],
-    });
+    try {
+      browserContext = await chromium.launchPersistentContext(USER_DATA_DIR, {
+        headless: HEADLESS,
+        executablePath,
+        viewport: DEFAULT_VIEWPORT,
+        locale: "en-US",
+        timezoneId: "America/Los_Angeles",
+        userAgent:
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-blink-features=AutomationControlled",
+          "--disable-infobars",
+          "--window-position=0,0",
+          "--ignore-certificate-errors",
+        ],
+      });
+      lastLaunchError = null;
+      lastLaunchErrorAt = null;
+    } catch (error: unknown) {
+      const formattedError = formatLaunchError(error);
+      lastLaunchError = formattedError;
+      lastLaunchErrorAt = Date.now();
+      throw new Error(formattedError);
+    }
 
     await browserContext.addInitScript(() => {
       Object.defineProperty(navigator, "webdriver", { get: () => false });

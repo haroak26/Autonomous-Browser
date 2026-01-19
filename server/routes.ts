@@ -3,25 +3,78 @@ import type { Server } from "http";
 import { storage } from "./storage";
 import { api } from "@shared/routes";
 import { z } from "zod";
-import puppeteer from 'puppeteer-extra';
-import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-import AdblockerPlugin from 'puppeteer-extra-plugin-adblocker';
-import { Browser, Page } from 'puppeteer';
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import puppeteerExtra from "puppeteer-extra";
+import StealthPlugin from "puppeteer-extra-plugin-stealth";
+import AdblockerPlugin from "puppeteer-extra-plugin-adblocker";
+import puppeteer, { Browser as BrowserType, Page } from "puppeteer";
+import { Browser as InstalledBrowser, Cache, detectBrowserPlatform, install } from "@puppeteer/browsers";
 import { registerChatRoutes } from "./replit_integrations/chat";
 import { registerImageRoutes } from "./replit_integrations/image";
 import { registerAudioRoutes } from "./replit_integrations/audio";
 import { openai } from "./replit_integrations/image/client"; 
 
-puppeteer.use(StealthPlugin());
-puppeteer.use(AdblockerPlugin({ blockTrackers: true }));
+puppeteerExtra.use(StealthPlugin());
+puppeteerExtra.use(AdblockerPlugin({ blockTrackers: true }));
 
-let browser: Browser | null = null;
+let browser: BrowserType | null = null;
 let page: Page | null = null;
+let executablePathPromise: Promise<string | undefined> | null = null;
+
+const DEFAULT_VIEWPORT = { width: 1280, height: 800 };
+const EXECUTABLE_PATH_ENV_VARS = ["PUPPETEER_EXECUTABLE_PATH", "CHROME_PATH"];
+
+async function resolveExecutablePath(): Promise<string | undefined> {
+  for (const envVar of EXECUTABLE_PATH_ENV_VARS) {
+    const envPath = process.env[envVar];
+    if (envPath && fs.existsSync(envPath)) {
+      return envPath;
+    }
+  }
+
+  const cacheDir =
+    process.env.PUPPETEER_CACHE_DIR ?? path.join(os.homedir(), ".cache", "puppeteer");
+  const platform = detectBrowserPlatform();
+  if (!platform) {
+    return undefined;
+  }
+
+  const buildId = puppeteer.PUPPETEER_REVISIONS.chrome;
+  const cache = new Cache(cacheDir);
+  let executablePath = cache.computeExecutablePath({
+    browser: InstalledBrowser.CHROME,
+    buildId,
+    platform,
+  });
+
+  if (!fs.existsSync(executablePath)) {
+    const installed = await install({
+      browser: InstalledBrowser.CHROME,
+      buildId,
+      cacheDir,
+      platform,
+    });
+    executablePath = installed.executablePath;
+  }
+
+  return executablePath;
+}
+
+async function getExecutablePath(): Promise<string | undefined> {
+  if (!executablePathPromise) {
+    executablePathPromise = resolveExecutablePath();
+  }
+  return executablePathPromise;
+}
 
 async function getBrowser() {
   if (!browser) {
-    browser = await puppeteer.launch({
+    const executablePath = await getExecutablePath();
+    browser = await puppeteerExtra.launch({
       headless: "new",
+      executablePath,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -36,7 +89,7 @@ async function getBrowser() {
     });
     
     page = await browser.newPage();
-    await page.setViewport({ width: 1280, height: 800 });
+    await page.setViewport(DEFAULT_VIEWPORT);
     
     // Additional stealth measures
     await page.evaluateOnNewDocument(() => {
